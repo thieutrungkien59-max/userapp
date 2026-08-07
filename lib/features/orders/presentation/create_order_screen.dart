@@ -1,0 +1,482 @@
+import 'dart:async';
+
+import 'package:flutter/material.dart' hide Badge;
+import 'package:flutter/services.dart';
+import 'package:go_router/go_router.dart';
+import 'package:latlong2/latlong.dart';
+
+import '../../../core/state/app_state.dart';
+import '../../../shared/widgets/app_widgets.dart';
+import '../data/geocoding_service.dart';
+import '../data/orders_api.dart';
+import '../data/peak_hour_model.dart';
+import '../data/system_config_api.dart';
+import 'location_picker_screen.dart';
+
+class CreateOrderScreen extends StatefulWidget {
+  const CreateOrderScreen({super.key});
+
+  @override
+  State<CreateOrderScreen> createState() => _CreateOrderScreenState();
+}
+
+class _CreateOrderScreenState extends State<CreateOrderScreen>
+    with WidgetsBindingObserver {
+  final weight = TextEditingController();
+  final cod = TextEditingController(text: '0');
+  final shippingFee = TextEditingController();
+  final pickupAddress = TextEditingController();
+  final deliveryAddress = TextEditingController();
+  final receiverName = TextEditingController();
+  final receiverPhone = TextEditingController();
+
+  LatLng? pickupLocation;
+  LatLng? deliveryLocation;
+
+  bool submitting = false;
+  bool resolvingPickupAddress = false;
+  bool resolvingDeliveryAddress = false;
+
+  PeakHourConfig? _peakHourConfig;
+  bool _loadingPeakHour = true;
+  Timer? _peakHourRefreshTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+
+    _loadPeakHourConfig();
+
+    // Tự đồng bộ lại cấu hình khi Customer vẫn đang mở màn tạo đơn.
+    _peakHourRefreshTimer = Timer.periodic(
+      const Duration(seconds: 10),
+      (_) => _loadPeakHourConfig(),
+    );
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+
+    if (state == AppLifecycleState.resumed) {
+      _loadPeakHourConfig();
+    }
+  }
+
+  Future<void> _loadPeakHourConfig() async {
+    try {
+      final config = await systemConfigApi.getPeakHourConfig();
+
+      if (!mounted) return;
+
+      setState(() {
+        _peakHourConfig = config;
+        _loadingPeakHour = false;
+      });
+    } catch (error) {
+      // Cảnh báo giờ cao điểm chỉ là thông tin bổ sung.
+      // Không chặn tạo đơn nếu API cấu hình tạm thời gặp lỗi.
+      if (!mounted) return;
+
+      setState(() {
+        _peakHourConfig = null;
+        _loadingPeakHour = false;
+      });
+
+      debugPrint('Không tải được cấu hình giờ cao điểm: $error');
+    }
+  }
+
+  @override
+  void dispose() {
+    _peakHourRefreshTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+
+    for (final controller in [
+      weight,
+      cod,
+      shippingFee,
+      pickupAddress,
+      deliveryAddress,
+      receiverName,
+      receiverPhone,
+    ]) {
+      controller.dispose();
+    }
+    super.dispose();
+  }
+
+  Future<void> _pickLocation({required bool isPickup}) async {
+    final result = await Navigator.of(context).push<LatLng>(
+      MaterialPageRoute(
+        builder: (_) => LocationPickerScreen(
+          title: isPickup ? 'Chọn vị trí lấy hàng' : 'Chọn vị trí giao hàng',
+          initialLocation: isPickup ? pickupLocation : deliveryLocation,
+        ),
+      ),
+    );
+
+    if (!mounted || result == null) return;
+
+    setState(() {
+      if (isPickup) {
+        resolvingPickupAddress = true;
+      } else {
+        resolvingDeliveryAddress = true;
+      }
+    });
+
+    try {
+      final address = await geocodingService.reverseGeocode(result);
+
+      if (!mounted) return;
+
+      setState(() {
+        if (isPickup) {
+          pickupLocation = result;
+          pickupAddress.text = address;
+        } else {
+          deliveryLocation = result;
+          deliveryAddress.text = address;
+        }
+      });
+    } catch (error) {
+      if (!mounted) return;
+
+      // Không ghi đè tọa độ/địa chỉ cũ khi vị trí mới không hợp lệ
+      // hoặc nằm ngoài Việt Nam.
+      _error(error.toString());
+    } finally {
+      if (mounted) {
+        setState(() {
+          if (isPickup) {
+            resolvingPickupAddress = false;
+          } else {
+            resolvingDeliveryAddress = false;
+          }
+        });
+      }
+    }
+  }
+
+  Future<void> submit() async {
+    if (resolvingPickupAddress || resolvingDeliveryAddress) {
+      _error('Ứng dụng đang xác định địa chỉ. Vui lòng chờ trong giây lát.');
+      return;
+    }
+
+    final customerId = appState.value.customerId;
+    final weightValue = double.tryParse(weight.text.trim());
+    final codValue = double.tryParse(cod.text.trim());
+    final feeValue = double.tryParse(shippingFee.text.trim());
+
+    if (customerId == null || customerId.isEmpty) {
+      _error('Phiên đăng nhập không có mã khách hàng. Vui lòng đăng nhập lại.');
+      return;
+    }
+
+    if (weightValue == null ||
+        weightValue <= 0 ||
+        codValue == null ||
+        codValue < 0 ||
+        feeValue == null ||
+        feeValue < 0 ||
+        receiverName.text.trim().isEmpty ||
+        receiverPhone.text.trim().length != 10) {
+      _error('Vui lòng nhập đầy đủ thông tin đơn hàng hợp lệ.');
+      return;
+    }
+
+    if (pickupLocation == null ||
+        deliveryLocation == null ||
+        pickupAddress.text.trim().isEmpty ||
+        deliveryAddress.text.trim().isEmpty) {
+      _error('Vui lòng chọn đầy đủ vị trí lấy hàng và vị trí giao hàng.');
+      return;
+    }
+
+    if (!_isValidCoordinate(pickupLocation!) ||
+        !_isValidCoordinate(deliveryLocation!)) {
+      _error('Tọa độ lấy hàng hoặc giao hàng không hợp lệ. Vui lòng chọn lại.');
+      return;
+    }
+
+    setState(() => submitting = true);
+
+    try {
+      await ordersApi.create(
+        CreateOrderRequest(
+          customerId: customerId,
+          receiverName: receiverName.text.trim(),
+          receiverPhone: receiverPhone.text.trim(),
+          pickupAddress: pickupAddress.text.trim(),
+          deliveryAddress: deliveryAddress.text.trim(),
+          weightKg: weightValue,
+          codAmount: codValue,
+          shippingFee: feeValue,
+          pickupLatitude: pickupLocation!.latitude,
+          pickupLongitude: pickupLocation!.longitude,
+          deliveryLatitude: deliveryLocation!.latitude,
+          deliveryLongitude: deliveryLocation!.longitude,
+        ),
+      );
+
+      if (mounted) {
+        context.go('/order-confirmation');
+      }
+    } catch (error) {
+      _error('Tạo đơn không thành công: $error');
+    } finally {
+      if (mounted) {
+        setState(() => submitting = false);
+      }
+    }
+  }
+
+  bool _isValidCoordinate(LatLng location) {
+    return location.latitude >= -90 &&
+        location.latitude <= 90 &&
+        location.longitude >= -180 &&
+        location.longitude <= 180;
+  }
+
+  void _error(String message) {
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Widget _input(
+    String label,
+    String hint,
+    TextEditingController controller, {
+    bool number = false,
+    bool phone = false,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 14),
+      child: InputBox(
+        label,
+        hint,
+        controller: controller,
+        keyboardType: number
+            ? const TextInputType.numberWithOptions(decimal: true)
+            : phone
+            ? TextInputType.phone
+            : null,
+        inputFormatters: phone
+            ? [
+                FilteringTextInputFormatter.digitsOnly,
+                LengthLimitingTextInputFormatter(10),
+              ]
+            : null,
+      ),
+    );
+  }
+
+  Widget _readonlyAddress({
+    required String label,
+    required TextEditingController controller,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 14),
+      child: TextField(
+        controller: controller,
+        readOnly: true,
+        minLines: 1,
+        maxLines: 3,
+        decoration: InputDecoration(
+          labelText: label,
+          hintText: 'Địa chỉ sẽ tự động hiển thị sau khi chọn vị trí',
+          prefixIcon: const Icon(Icons.location_on_outlined),
+          filled: true,
+          fillColor: Colors.grey.shade100,
+          border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+        ),
+      ),
+    );
+  }
+
+  Widget _locationSelector({
+    required String label,
+    required LatLng? location,
+    required String address,
+    required bool resolving,
+    required VoidCallback onTap,
+  }) {
+    final hasLocation = location != null && address.trim().isNotEmpty;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 14),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        border: Border.all(
+          color: hasLocation ? Colors.green : Colors.grey.shade300,
+        ),
+        borderRadius: BorderRadius.circular(12),
+        color: hasLocation ? Colors.green.shade50 : null,
+      ),
+      child: Row(
+        children: [
+          Icon(
+            hasLocation ? Icons.location_on : Icons.location_off,
+            color: hasLocation ? Colors.green : Colors.grey,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: resolving
+                ? const Row(
+                    children: [
+                      SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                      SizedBox(width: 10),
+                      Expanded(child: Text('Đang xác định địa chỉ...')),
+                    ],
+                  )
+                : Text(
+                    hasLocation
+                        ? '$label đã xác nhận\n$address'
+                        : '$label chưa được chọn',
+                    maxLines: 4,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+          ),
+          const SizedBox(width: 8),
+          OutlinedButton(
+            onPressed: resolving ? null : onTap,
+            child: Text(hasLocation ? 'Chọn lại' : 'Chọn trên bản đồ'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPeakHourWarning() {
+    if (_loadingPeakHour) {
+      return const SizedBox.shrink();
+    }
+
+    final config = _peakHourConfig;
+
+    if (config == null) {
+      return const SizedBox.shrink();
+    }
+
+    if (!config.isActiveAt(DateTime.now())) {
+      return const SizedBox.shrink();
+    }
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 18),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.orange.shade50,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.orange.shade300),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.warning_amber_rounded, color: Colors.orange.shade800),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Đang trong giờ cao điểm',
+                  style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.orange.shade900,
+                  ),
+                ),
+                const SizedBox(height: 5),
+                Text('Khung giờ: ${config.displayTimeRange}'),
+                Text('Hệ số phụ phí: ${config.displayMultiplier}'),
+                const SizedBox(height: 5),
+                const Text(
+                  'Phí vận chuyển có thể cao hơn so với thời gian thông thường.',
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: const PageHeader('Tạo đơn hàng'),
+      body: ListView(
+        padding: const EdgeInsets.all(24),
+        children: [
+          const Text(
+            'Thông tin đơn hàng',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 18),
+          _buildPeakHourWarning(),
+          _input('Khối lượng (kg)', 'Ví dụ: 2.5', weight, number: true),
+          _input('Tiền COD (VNĐ)', '0 nếu không thu hộ', cod, number: true),
+          _input(
+            'Phí vận chuyển (VNĐ)',
+            'Nhập phí vận chuyển',
+            shippingFee,
+            number: true,
+          ),
+          const Divider(height: 40, thickness: 4),
+          const Text(
+            'Lộ trình',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 18),
+
+          _locationSelector(
+            label: 'Vị trí lấy hàng',
+            location: pickupLocation,
+            address: pickupAddress.text,
+            resolving: resolvingPickupAddress,
+            onTap: () => _pickLocation(isPickup: true),
+          ),
+          _readonlyAddress(
+            label: 'Địa chỉ lấy hàng',
+            controller: pickupAddress,
+          ),
+
+          _locationSelector(
+            label: 'Vị trí giao hàng',
+            location: deliveryLocation,
+            address: deliveryAddress.text,
+            resolving: resolvingDeliveryAddress,
+            onTap: () => _pickLocation(isPickup: false),
+          ),
+          _readonlyAddress(
+            label: 'Địa chỉ giao hàng',
+            controller: deliveryAddress,
+          ),
+
+          const Divider(height: 40, thickness: 4),
+          const Text(
+            'Người nhận',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 18),
+          _input('Họ và tên', 'Nhập tên người nhận', receiverName),
+          _input('Số điện thoại', '090xxxxxxx', receiverPhone, phone: true),
+          const SizedBox(height: 16),
+          PrimaryButton(
+            submitting ? 'Đang tạo đơn...' : 'Xác nhận tạo đơn',
+            onTap: submitting ? null : submit,
+          ),
+        ],
+      ),
+    );
+  }
+}

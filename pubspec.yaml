@@ -1,6 +1,6 @@
 name: userapp
 description: "A new Flutter project."
-publish_to: 'none'
+publish_to: "none"
 version: 0.1.0+1
 
 environment:
@@ -9,6 +9,14 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  flutter_riverpod: ^3.0.3
+  go_router: ^17.0.0
+  http: ^1.6.0
+  shared_preferences: ^2.5.5
+  google_fonts: ^8.0.2
+  flutter_map: ^8.2.2
+  latlong2: ^0.9.1
+  image_picker: ^1.2.1
 
 dev_dependencies:
   flutter_test:
