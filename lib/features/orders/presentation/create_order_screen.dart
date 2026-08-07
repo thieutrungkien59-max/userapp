@@ -10,6 +10,8 @@ import '../../../shared/widgets/app_widgets.dart';
 import '../data/geocoding_service.dart';
 import '../data/orders_api.dart';
 import '../data/peak_hour_model.dart';
+import '../data/shipping_fee_api.dart';
+import '../data/shipping_quote_model.dart';
 import '../data/system_config_api.dart';
 import 'location_picker_screen.dart';
 
@@ -40,6 +42,9 @@ class _CreateOrderScreenState extends State<CreateOrderScreen>
   PeakHourConfig? _peakHourConfig;
   bool _loadingPeakHour = true;
   Timer? _peakHourRefreshTimer;
+
+  ShippingQuote? _shippingQuote;
+  bool _calculatingShippingFee = false;
 
   @override
   void initState() {
@@ -113,6 +118,7 @@ class _CreateOrderScreenState extends State<CreateOrderScreen>
         builder: (_) => LocationPickerScreen(
           title: isPickup ? 'Chọn vị trí lấy hàng' : 'Chọn vị trí giao hàng',
           initialLocation: isPickup ? pickupLocation : deliveryLocation,
+          routeStartLocation: isPickup ? null : pickupLocation,
         ),
       ),
     );
@@ -141,6 +147,9 @@ class _CreateOrderScreenState extends State<CreateOrderScreen>
           deliveryAddress.text = address;
         }
       });
+
+      // Khi đủ cả 2 điểm, backend tính tuyến đường + phí ngay.
+      await _refreshShippingQuote();
     } catch (error) {
       if (!mounted) return;
 
@@ -160,6 +169,136 @@ class _CreateOrderScreenState extends State<CreateOrderScreen>
     }
   }
 
+  Future<void> _refreshShippingQuote() async {
+    final pickup = pickupLocation;
+    final delivery = deliveryLocation;
+
+    if (pickup == null || delivery == null) {
+      if (!mounted) return;
+
+      setState(() {
+        _shippingQuote = null;
+        shippingFee.clear();
+      });
+      return;
+    }
+
+    setState(() => _calculatingShippingFee = true);
+
+    try {
+      final quote = await shippingFeeApi.calculate(
+        pickup: pickup,
+        delivery: delivery,
+      );
+
+      if (!mounted) return;
+
+      setState(() {
+        _shippingQuote = quote;
+        shippingFee.text = quote.shippingFee.toStringAsFixed(0);
+      });
+    } catch (error) {
+      if (!mounted) return;
+
+      setState(() {
+        _shippingQuote = null;
+        shippingFee.clear();
+      });
+
+      _error('Không thể tính phí vận chuyển: $error');
+    } finally {
+      if (mounted) {
+        setState(() => _calculatingShippingFee = false);
+      }
+    }
+  }
+
+  String _formatMoney(double value) {
+    final digits = value.round().toString();
+    final buffer = StringBuffer();
+
+    for (var i = 0; i < digits.length; i++) {
+      final remaining = digits.length - i;
+      buffer.write(digits[i]);
+
+      if (remaining > 1 && remaining % 3 == 1) {
+        buffer.write('.');
+      }
+    }
+
+    return '${buffer.toString()} đ';
+  }
+
+  Widget _shippingFeeSummary() {
+    if (_calculatingShippingFee) {
+      return Container(
+        margin: const EdgeInsets.only(bottom: 14),
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          border: Border.all(color: Colors.grey.shade300),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: const Row(
+          children: [
+            SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+            SizedBox(width: 10),
+            Text('Đang tính quãng đường và phí vận chuyển...'),
+          ],
+        ),
+      );
+    }
+
+    final quote = _shippingQuote;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 14),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: quote == null ? Colors.grey.shade50 : Colors.blue.shade50,
+        border: Border.all(
+          color: quote == null ? Colors.grey.shade300 : Colors.blue.shade200,
+        ),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: quote == null
+          ? const Text(
+              'Chọn đầy đủ điểm lấy và điểm giao để hệ thống tự tính phí.',
+            )
+          : Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Phí vận chuyển: ${_formatMoney(quote.shippingFee)}',
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  'Quãng đường đường bộ: '
+                  '${quote.distanceKm.toStringAsFixed(2)} km',
+                ),
+                Text('Thời gian dự kiến: ${quote.durationMinutes} phút'),
+                Text('Phí cơ bản: ${_formatMoney(quote.baseFee)}'),
+                Text('Đơn giá/km: ${_formatMoney(quote.feePerKm)}'),
+                if (quote.isPeakHour)
+                  Text(
+                    'Giờ cao điểm: x${quote.peakMultiplier}',
+                    style: TextStyle(
+                      color: Colors.orange.shade900,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+              ],
+            ),
+    );
+  }
+
   Future<void> submit() async {
     if (resolvingPickupAddress || resolvingDeliveryAddress) {
       _error('Ứng dụng đang xác định địa chỉ. Vui lòng chờ trong giây lát.');
@@ -169,7 +308,7 @@ class _CreateOrderScreenState extends State<CreateOrderScreen>
     final customerId = appState.value.customerId;
     final weightValue = double.tryParse(weight.text.trim());
     final codValue = double.tryParse(cod.text.trim());
-    final feeValue = double.tryParse(shippingFee.text.trim());
+    final feeValue = _shippingQuote?.shippingFee;
 
     if (customerId == null || customerId.isEmpty) {
       _error('Phiên đăng nhập không có mã khách hàng. Vui lòng đăng nhập lại.');
@@ -425,12 +564,7 @@ class _CreateOrderScreenState extends State<CreateOrderScreen>
           _buildPeakHourWarning(),
           _input('Khối lượng (kg)', 'Ví dụ: 2.5', weight, number: true),
           _input('Tiền COD (VNĐ)', '0 nếu không thu hộ', cod, number: true),
-          _input(
-            'Phí vận chuyển (VNĐ)',
-            'Nhập phí vận chuyển',
-            shippingFee,
-            number: true,
-          ),
+          _shippingFeeSummary(),
           const Divider(height: 40, thickness: 4),
           const Text(
             'Lộ trình',
