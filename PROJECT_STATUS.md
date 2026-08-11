@@ -59,7 +59,7 @@ The app currently calls the following endpoints. The backend contract must remai
 | Area | Endpoint | Method |
 | --- | --- | --- |
 | Register customer | `/api/Auth/register-khach-hang` | `POST` |
-| Login | `/api/Auth/login` | `POST` |
+| Login | `/api/Auth/login` | `POST` (`tenDangNhap`, `matKhau`) |
 | Get customer profile | `/api/Auth/profile/{accountId}` | `GET` |
 | Update customer | `/api/Auth/update-khach-hang/{customerId}` | `PUT` |
 | Create order | `/api/DonHang/tao-don-moi` | `POST` |

@@ -5,10 +5,75 @@ import '../../../core/state/app_state.dart';
 import '../../../core/state/session_store.dart';
 import '../../../shared/widgets/app_widgets.dart';
 import '../../../theme/app_colors.dart';
-import '../../auth/data/auth_api.dart';
+import '../data/default_pickup_store.dart';
+import 'edit_customer_profile_screen.dart';
 
-class ProfileScreen extends StatelessWidget {
+class ProfileScreen extends StatefulWidget {
   const ProfileScreen({super.key});
+
+  @override
+  State<ProfileScreen> createState() => _ProfileScreenState();
+}
+
+class _ProfileScreenState extends State<ProfileScreen> {
+  DefaultPickupLocation? _defaultPickup;
+  bool _loadingPickup = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadDefaultPickup();
+  }
+
+  Future<void> _loadDefaultPickup() async {
+    final customerId = appState.value.customerId;
+
+    if (customerId == null || customerId.isEmpty) {
+      if (mounted) {
+        setState(() => _loadingPickup = false);
+      }
+      return;
+    }
+
+    final pickup = await defaultPickupStore.load(customerId);
+
+    if (!mounted) return;
+
+    setState(() {
+      _defaultPickup = pickup;
+      _loadingPickup = false;
+    });
+  }
+
+  Future<void> _openEditProfile(BuildContext context, AppState state) async {
+    final customerId = state.customerId;
+
+    if (customerId == null || customerId.trim().isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Không tìm thấy mã khách hàng. Vui lòng đăng nhập lại.',
+          ),
+        ),
+      );
+      return;
+    }
+
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute(
+        builder: (_) => EditCustomerProfileScreen(
+          customerId: customerId,
+          fullName: state.name,
+          phone: state.phone,
+          email: state.email,
+          address: state.defaultAddress,
+        ),
+      ),
+    );
+
+    await _loadDefaultPickup();
+  }
+
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: const PageHeader('Hồ sơ khách hàng'),
@@ -34,7 +99,10 @@ class ProfileScreen extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: 8),
-                Badge(state.phone, color: AppColors.muted),
+                Badge(
+                  state.phone.isEmpty ? 'Chưa cập nhật SĐT' : state.phone,
+                  color: AppColors.muted,
+                ),
               ],
             ),
           ),
@@ -43,39 +111,58 @@ class ProfileScreen extends StatelessWidget {
             child: Column(
               children: [
                 ListTile(
+                  leading: const Icon(Icons.person_outline),
                   title: const Text('Họ và tên'),
-                  subtitle: Text(state.name),
+                  subtitle: Text(
+                    state.name.isEmpty ? 'Chưa cập nhật' : state.name,
+                  ),
                 ),
                 ListTile(
+                  leading: const Icon(Icons.phone_outlined),
                   title: const Text('Số điện thoại'),
-                  subtitle: Text(state.phone),
+                  subtitle: Text(
+                    state.phone.isEmpty ? 'Chưa cập nhật' : state.phone,
+                  ),
                 ),
                 ListTile(
+                  leading: const Icon(Icons.email_outlined),
                   title: const Text('Email'),
                   subtitle: Text(
                     state.email.isEmpty ? 'Chưa cập nhật' : state.email,
                   ),
                 ),
                 ListTile(
-                  title: const Text('Địa chỉ mặc định'),
-                  subtitle: Text(
-                    state.defaultAddress.isEmpty
-                        ? 'Chưa cập nhật'
-                        : state.defaultAddress,
-                  ),
+                  leading: const Icon(Icons.add_location_alt_outlined),
+                  title: const Text('Điểm lấy hàng mặc định'),
+                  subtitle: _loadingPickup
+                      ? const Text('Đang tải...')
+                      : Text(
+                          _defaultPickup == null
+                              ? 'Chưa thiết lập'
+                              : _defaultPickup!.address,
+                        ),
+                  trailing: _defaultPickup == null
+                      ? null
+                      : const Icon(Icons.check_circle, color: Colors.green),
                 ),
                 ListTile(
+                  leading: const Icon(Icons.badge_outlined),
                   title: const Text('Mã khách hàng'),
                   subtitle: Text(state.customerId ?? 'Không có dữ liệu'),
+                  trailing: const Icon(
+                    Icons.lock_outline,
+                    size: 18,
+                    color: AppColors.muted,
+                  ),
                 ),
               ],
             ),
           ),
           const SizedBox(height: 18),
           PrimaryButton(
-            'Chinh sua ho so',
+            'Chỉnh sửa hồ sơ',
             icon: Icons.edit_outlined,
-            onTap: () => _editProfile(context, state),
+            onTap: () => _openEditProfile(context, state),
           ),
           const SizedBox(height: 12),
           PrimaryButton(
@@ -85,6 +172,7 @@ class ProfileScreen extends StatelessWidget {
             onTap: () async {
               appState.value = AppState();
               await sessionStore.clear();
+
               if (!context.mounted) return;
               context.go('/login');
             },
@@ -93,59 +181,4 @@ class ProfileScreen extends StatelessWidget {
       ),
     ),
   );
-}
-
-Future<void> _editProfile(BuildContext context, AppState state) async {
-  final name = TextEditingController(text: state.name);
-  final phone = TextEditingController(text: state.phone);
-  final email = TextEditingController(text: state.email);
-  final address = TextEditingController(text: state.defaultAddress);
-  await showDialog<void>(
-    context: context,
-    builder: (dialogContext) => AlertDialog(
-      title: const Text('Chinh sua ho so'),
-      content: SingleChildScrollView(
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          TextField(controller: name, decoration: const InputDecoration(labelText: 'Ho va ten')),
-          TextField(controller: phone, keyboardType: TextInputType.phone, decoration: const InputDecoration(labelText: 'So dien thoai')),
-          TextField(controller: email, keyboardType: TextInputType.emailAddress, decoration: const InputDecoration(labelText: 'Email')),
-          TextField(controller: address, minLines: 2, maxLines: 3, decoration: const InputDecoration(labelText: 'Dia chi mac dinh')),
-        ]),
-      ),
-      actions: [
-        TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('Huy')),
-        TextButton(
-          onPressed: () async {
-            final customerId = state.customerId;
-            if (customerId == null || name.text.trim().isEmpty || phone.text.trim().isEmpty) return;
-            try {
-              final session = await authApi.updateCustomer(
-                customerId: customerId,
-                name: name.text.trim(),
-                phone: phone.text.trim(),
-                email: email.text.trim().isEmpty ? null : email.text.trim(),
-                address: address.text.trim().isEmpty ? null : address.text.trim(),
-              );
-              appState.value = state.copyWith(
-                name: session.name,
-                phone: session.phone,
-                email: session.email,
-                defaultAddress: session.defaultAddress,
-              );
-              await sessionStore.save(appState.value);
-              if (dialogContext.mounted) Navigator.pop(dialogContext);
-            } catch (error) {
-              if (dialogContext.mounted) {
-                ScaffoldMessenger.of(dialogContext).showSnackBar(
-                  SnackBar(content: Text('Khong the cap nhat ho so: $error')),
-                );
-              }
-            }
-          },
-          child: const Text('Luu'),
-        ),
-      ],
-    ),
-  );
-  name.dispose(); phone.dispose(); email.dispose(); address.dispose();
 }

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart' hide Badge;
 import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -14,19 +16,110 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  late Future<List<CustomerOrder>> _orders;
+  List<CustomerOrder>? _currentOrders;
+  bool _isInitialLoading = true;
+  String? _errorMessage;
+
+  Timer? _pollTimer;
+  bool _isPolling = false;
+
+  static const Duration _pollInterval = Duration(seconds: 5);
 
   @override
   void initState() {
     super.initState();
-    _orders = _load();
+
+    _loadInitial();
+    _startPolling();
+  }
+
+  @override
+  void dispose() {
+    _pollTimer?.cancel();
+    super.dispose();
   }
 
   Future<List<CustomerOrder>> _load({bool forceRefresh = false}) {
     final id = appState.value.customerId;
+
     return id == null
         ? Future.value([])
         : ordersApi.forCustomer(id, forceRefresh: forceRefresh);
+  }
+
+  Future<void> _loadInitial() async {
+    try {
+      final orders = await _load(forceRefresh: true);
+
+      if (!mounted) return;
+
+      setState(() {
+        _currentOrders = orders;
+        _errorMessage = null;
+        _isInitialLoading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+
+      setState(() {
+        _errorMessage = e.toString().replaceAll('Exception: ', '');
+        _isInitialLoading = false;
+      });
+    }
+  }
+
+  void _startPolling() {
+    _pollTimer?.cancel();
+
+    _pollTimer = Timer.periodic(_pollInterval, (_) => _pollOrders());
+  }
+
+  Future<void> _pollOrders() async {
+    if (_isPolling || !mounted) return;
+
+    _isPolling = true;
+
+    try {
+      final freshOrders = await _load(forceRefresh: true);
+
+      if (!mounted) return;
+
+      // QUAN TRỌNG:
+      // Chỉ cập nhật data. Không thay FutureBuilder/ListView bằng widget
+      // loading nên ScrollPosition hiện tại được giữ nguyên.
+      setState(() {
+        _currentOrders = freshOrders;
+        _errorMessage = null;
+      });
+    } catch (_) {
+      // Poll lỗi tạm thời: giữ nguyên UI/data hiện có.
+    } finally {
+      _isPolling = false;
+    }
+  }
+
+  Future<void> _refresh() async {
+    try {
+      final freshOrders = await _load(forceRefresh: true);
+
+      if (!mounted) return;
+
+      setState(() {
+        _currentOrders = freshOrders;
+        _errorMessage = null;
+      });
+    } catch (e) {
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Không thể làm mới: '
+            '${e.toString().replaceAll('Exception: ', '')}',
+          ),
+        ),
+      );
+    }
   }
 
   @override
@@ -43,70 +136,74 @@ class _HomeScreenState extends State<HomeScreen> {
       centerTitle: true,
     ),
     bottomNavigationBar: const AppNav(0),
-    body: RefreshIndicator(
-      onRefresh: () async =>
-          setState(() => _orders = _load(forceRefresh: true)),
-      child: FutureBuilder<List<CustomerOrder>>(
-        future: _orders,
-        builder: (context, snapshot) {
-          if (snapshot.connectionState != ConnectionState.done) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          if (snapshot.hasError)
-            return _ErrorView(onRetry: () => setState(() => _orders = _load()));
-          final orders = snapshot.data ?? [];
-          final active = orders
-              .where(
-                (order) => !order.status.toLowerCase().contains('hoàn tất'),
-              )
-              .toList();
-          final completed = orders.length - active.length;
-          return ListView(
-            padding: const EdgeInsets.all(18),
-            children: [
-              PrimaryButton(
-                'Tạo đơn hàng',
-                icon: Icons.add_box_outlined,
-                onTap: () => context.go('/create-order'),
-              ),
-              const SizedBox(height: 16),
-              Row(
-                children: [
-                  Expanded(
-                    child: _Stat('${active.length}', 'Đang xử lý', appRed),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: _Stat('$completed', 'Hoàn thành', AppColors.green),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 18),
-              Text(
-                'Đơn hàng đang xử lý',
-                style: GoogleFonts.spaceGrotesk(
-                  fontWeight: FontWeight.bold,
-                  fontSize: 19,
-                ),
-              ),
-              const SizedBox(height: 12),
-              if (active.isEmpty)
-                const CardBox(child: Text('Chưa có đơn hàng đang xử lý.'))
-              else
-                ...active
-                    .take(3)
-                    .map(
-                      (order) => Padding(
-                        padding: const EdgeInsets.only(bottom: 10),
-                        child: _OrderCard(order),
-                      ),
-                    ),
-            ],
-          );
-        },
-      ),
-    ),
+    body: _buildBody(),
   );
+
+  Widget _buildBody() {
+    if (_isInitialLoading && _currentOrders == null) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    if (_errorMessage != null && _currentOrders == null) {
+      return _ErrorView(onRetry: _loadInitial);
+    }
+
+    final orders = _currentOrders ?? [];
+
+    final active = orders
+        .where((order) => isCustomerOrderActive(order.status))
+        .toList();
+
+    final completed = orders
+        .where((order) => isCustomerOrderCompleted(order.status))
+        .length;
+
+    return RefreshIndicator(
+      onRefresh: _refresh,
+      child: ListView(
+        // Key ổn định giúp Flutter giữ nguyên ScrollPosition khi setState.
+        key: const PageStorageKey<String>('customer-home-list'),
+        padding: const EdgeInsets.all(18),
+        children: [
+          PrimaryButton(
+            'Tạo đơn hàng',
+            icon: Icons.add_box_outlined,
+            onTap: () => context.go('/create-order'),
+          ),
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              Expanded(child: _Stat('${active.length}', 'Đang xử lý', appRed)),
+              const SizedBox(width: 10),
+              Expanded(
+                child: _Stat('$completed', 'Hoàn thành', AppColors.green),
+              ),
+            ],
+          ),
+          const SizedBox(height: 18),
+          Text(
+            'Đơn hàng đang xử lý',
+            style: GoogleFonts.spaceGrotesk(
+              fontWeight: FontWeight.bold,
+              fontSize: 19,
+            ),
+          ),
+          const SizedBox(height: 12),
+          if (active.isEmpty)
+            const CardBox(child: Text('Chưa có đơn hàng đang xử lý.'))
+          else
+            ...active
+                .take(3)
+                .map(
+                  (order) => Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: _OrderCard(order),
+                  ),
+                ),
+        ],
+      ),
+    );
+  }
 }
 
 class _ErrorView extends StatelessWidget {
@@ -149,7 +246,7 @@ class _OrderCard extends StatelessWidget {
   final CustomerOrder order;
   @override
   Widget build(BuildContext context) => GestureDetector(
-    onTap: () => context.go('/orders/${order.id}/status'),
+    onTap: () => context.push('/orders/${order.id}/status'),
     child: CardBox(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -158,7 +255,7 @@ class _OrderCard extends StatelessWidget {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Text(order.id, style: GoogleFonts.ibmPlexMono()),
-              Badge(order.status, color: appRed),
+              Badge(customerOrderStatusLabel(order.status), color: appRed),
             ],
           ),
           const Divider(height: 22),
