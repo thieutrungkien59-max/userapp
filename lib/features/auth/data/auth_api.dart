@@ -76,7 +76,10 @@ class AuthApi {
   }) async {
     final response = await apiClient.post(
       '/api/Auth/login',
-      data: {'username': username, 'password': password},
+      // The Auth controller uses the same Vietnamese account fields as the
+      // customer-registration endpoint. `username`/`password` do not bind to
+      // that DTO, leaving both credentials empty on the server.
+      data: {'tenDangNhap': username, 'matKhau': password},
     );
     return _customerSessionFromAuthResponse(
       response,

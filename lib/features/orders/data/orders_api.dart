@@ -1,4 +1,132 @@
-import '../../../core/network/api_client.dart';
+import 'package:userapp/core/network/api_client.dart';
+
+String _compactOrderStatus(String raw) {
+  return raw.trim().replaceAll(RegExp(r'[^A-Za-z0-9]'), '').toUpperCase();
+}
+
+/// Chuẩn hóa trạng thái backend về nhãn dành cho Customer.
+///
+/// Hỗ trợ cả:
+/// CHO_XAC_NHAN
+/// ChoXacNhan
+/// cho-xac-nhan
+/// ...vì đều được compact trước khi map.
+String customerOrderStatusLabel(String raw) {
+  switch (_compactOrderStatus(raw)) {
+    case 'CHOXACNHAN':
+      return 'Chờ phân công';
+
+    case 'CHOSHIPPERXACNHAN':
+      return 'Chờ tài xế xác nhận';
+
+    case 'DAXACNHAN':
+      return 'Tài xế đã nhận đơn';
+
+    case 'DANGGIAO':
+    case 'DANGVANCHUYEN':
+      return 'Đang giao hàng';
+
+    case 'DAGIAO':
+    case 'HOANTHANH':
+      return 'Đã giao thành công';
+
+    case 'GIAOTHATBAI':
+      return 'Giao hàng thất bại';
+
+    case 'DAHUY':
+      return 'Đã hủy';
+
+    case 'HOANTRA':
+    case 'DAHOANTRA':
+      return 'Hoàn trả';
+
+    case 'TREO':
+      return 'Đang tạm giữ';
+
+    case 'CANDIEUPHOTHUCONG':
+      return 'Cần điều phối thủ công';
+
+    default:
+      final value = raw.trim();
+      return value.isEmpty ? 'Chưa có trạng thái' : value;
+  }
+}
+
+/// Đơn được tính vào "Hoàn thành" chỉ khi đã kết thúc thành công.
+/// DaHuy/GiaoThatBai/HoanTra không bị tính nhầm thành đang xử lý.
+bool isCustomerOrderCompleted(String raw) {
+  switch (_compactOrderStatus(raw)) {
+    case 'DAGIAO':
+    case 'HOANTHANH':
+      return true;
+    default:
+      return false;
+  }
+}
+
+/// Đã kết thúc nhưng không phải giao thành công.
+bool isCustomerOrderClosed(String raw) {
+  switch (_compactOrderStatus(raw)) {
+    case 'DAGIAO':
+    case 'HOANTHANH':
+    case 'DAHUY':
+    case 'HOANTRA':
+    case 'DAHOANTRA':
+      return true;
+    default:
+      return false;
+  }
+}
+
+/// Home "Đang xử lý" chỉ chứa đơn còn trong tiến trình.
+bool isCustomerOrderActive(String raw) => !isCustomerOrderClosed(raw);
+
+/// Timeline dành cho khách chỉ hiển thị mô tả nghiệp vụ ngắn,
+/// không lộ ghi chú kỹ thuật như tải trọng/ranking/ID nội bộ.
+String customerHistoryDescription(String status, {String? backendNote}) {
+  switch (_compactOrderStatus(status)) {
+    case 'CHOXACNHAN':
+      // Trường hợp Shipper trả đơn về hàng chờ thì note backend có ý nghĩa
+      // với khách hơn câu "đơn mới được tạo".
+      final note = backendNote?.toLowerCase() ?? '';
+      if (note.contains('trả') ||
+          note.contains('dieu phoi') ||
+          note.contains('điều phối')) {
+        return 'Đơn hàng đang được tìm tài xế phù hợp khác.';
+      }
+      return 'Đơn hàng đã được tạo và đang chờ phân công tài xế.';
+
+    case 'CHOSHIPPERXACNHAN':
+      return 'Hệ thống đã phân công tài xế cho đơn hàng.';
+
+    case 'DAXACNHAN':
+      return 'Tài xế đã xác nhận nhận đơn.';
+
+    case 'DANGGIAO':
+    case 'DANGVANCHUYEN':
+      return 'Tài xế đã lấy hàng và đang giao đến người nhận.';
+
+    case 'DAGIAO':
+    case 'HOANTHANH':
+      return 'Đơn hàng đã được giao thành công.';
+
+    case 'GIAOTHATBAI':
+      return 'Tài xế chưa thể giao hàng thành công.';
+
+    case 'DAHUY':
+      return 'Đơn hàng đã được hủy.';
+
+    case 'HOANTRA':
+    case 'DAHOANTRA':
+      return 'Đơn hàng đang trong quy trình hoàn trả.';
+
+    case 'TREO':
+      return 'Đơn hàng đang tạm giữ để xử lý thông tin.';
+
+    default:
+      return 'Trạng thái đơn hàng vừa được cập nhật.';
+  }
+}
 
 class CreateOrderRequest {
   const CreateOrderRequest({
@@ -53,11 +181,28 @@ class CustomerOrder {
     required this.codAmount,
     required this.shippingFee,
     this.createdAt,
+    this.senderName,
+    this.senderPhone,
+    this.receiverName,
+    this.receiverPhone,
+    this.weightKg,
+    this.sizeText,
+    this.distanceKm,
+    this.estimatedMinutes,
   });
 
   final String id, status, pickupAddress, deliveryAddress;
   final num codAmount, shippingFee;
   final String? createdAt;
+
+  final String? senderName;
+  final String? senderPhone;
+  final String? receiverName;
+  final String? receiverPhone;
+  final num? weightKg;
+  final String? sizeText;
+  final num? distanceKm;
+  final num? estimatedMinutes;
 
   factory CustomerOrder.fromJson(Map<String, dynamic> json) => CustomerOrder(
     id: _value(json, const ['maDonHang', 'maDh', 'id']) ?? '',
@@ -83,6 +228,17 @@ class CustomerOrder {
       'ngayTao',
       'thoiGianTao',
       'createdAt',
+    ]),
+    senderName: _value(json, const ['tenNguoiGui', 'senderName']),
+    senderPhone: _value(json, const ['sdtNguoiGui', 'senderPhone']),
+    receiverName: _value(json, const ['tenNguoiNhan', 'receiverName']),
+    receiverPhone: _value(json, const ['sdtNguoiNhan', 'receiverPhone']),
+    weightKg: _numValue(json, const ['khoiLuong', 'trongLuong', 'weightKg']),
+    sizeText: _value(json, const ['kichThuoc', 'size']),
+    distanceKm: _numValue(json, const ['quangDuongKm', 'distanceKm']),
+    estimatedMinutes: _numValue(json, const [
+      'duKienGiaoPhut',
+      'durationMinutes',
     ]),
   );
 }
@@ -110,6 +266,28 @@ class DeliveryProof {
     otpSignature: _value(json, const ['chuKyOtp', 'otpSignature']),
     time: _value(json, const ['thoiGian', 'ngayTao', 'createdAt']),
   );
+}
+
+class CustomerNotification {
+  const CustomerNotification({
+    required this.orderId,
+    required this.status,
+    this.time,
+    this.note,
+  });
+
+  final String orderId;
+  final String status;
+  final String? time;
+  final String? note;
+
+  factory CustomerNotification.fromJson(Map<String, dynamic> json) =>
+      CustomerNotification(
+        orderId: _value(json, const ['maDh', 'maDonHang']) ?? '',
+        status: _value(json, const ['trangThai', 'trangThaiMoi']) ?? '',
+        time: _value(json, const ['thoiGian', 'createdAt']),
+        note: _value(json, const ['ghiChu', 'note']),
+      );
 }
 
 class OrderDetailData {
@@ -180,7 +358,9 @@ class OrdersApi {
 
   Future<OrderDetailData?> detailById(String orderId) async {
     try {
-      final response = await apiClient.get('/api/DonHang/chi-tiet/$orderId');
+      final response = await apiClient.get(
+        '/api/DonHang/khach-hang/chi-tiet/$orderId',
+      );
       if (response is! Map) return _cachedDetail(orderId);
       final root = _map(response);
       final orderMap = _mapOrNull(root['donHang']) ?? _findOrderMap(root);
@@ -190,7 +370,8 @@ class OrdersApi {
       ).map(OrderStatusHistory.fromJson).toList();
       final proofMap = _mapOrNull(root['minhChung']);
       final order = CustomerOrder.fromJson(orderMap);
-      _orderCache[order.id] = order;
+      _syncOrderToCaches(order);
+
       return OrderDetailData(
         order: order,
         history: history,
@@ -199,6 +380,16 @@ class OrdersApi {
     } catch (_) {
       return _cachedDetail(orderId);
     }
+  }
+
+  Future<List<CustomerNotification>> notificationsForCustomer(
+    String customerId,
+  ) async {
+    final response = await apiClient.get(
+      '/api/DonHang/khach-hang/$customerId/thong-bao',
+    );
+
+    return _listOfMaps(response).map(CustomerNotification.fromJson).toList();
   }
 
   Future<List<CustomerOrder>> _loadCustomerOrders(String customerId) async {
@@ -211,12 +402,40 @@ class OrdersApi {
           .map(CustomerOrder.fromJson)
           .toList();
       _customerCache[customerId] = orders;
+
       for (final order in orders) {
-        if (order.id.isNotEmpty) _orderCache[order.id] = order;
+        if (order.id.isNotEmpty) {
+          _orderCache[order.id] = order;
+        }
       }
+
       return orders;
     } finally {
       _customerRequests.remove(customerId);
+    }
+  }
+
+  void _syncOrderToCaches(CustomerOrder order) {
+    if (order.id.isEmpty) return;
+
+    _orderCache[order.id] = order;
+
+    // Detail và list trước đây dùng 2 cache khác nhau.
+    // Khi detail nhận trạng thái mới, cập nhật luôn mọi list cache
+    // đang chứa cùng mã đơn để Home/Orders không giữ state cũ.
+    final customerIds = _customerCache.keys.toList();
+
+    for (final customerId in customerIds) {
+      final cached = _customerCache[customerId];
+      if (cached == null) continue;
+
+      final index = cached.indexWhere((item) => item.id == order.id);
+
+      if (index < 0) continue;
+
+      final next = List<CustomerOrder>.from(cached);
+      next[index] = order;
+      _customerCache[customerId] = next;
     }
   }
 
@@ -269,6 +488,11 @@ List<Map<String, dynamic>> _listOfMaps(Object? value) {
     return _listOfMaps(map['\$values'] ?? map['data'] ?? map['items']);
   }
   return [];
+}
+
+num? _numValue(Map<String, dynamic> map, List<String> names) {
+  final value = _value(map, names);
+  return value == null ? null : num.tryParse(value);
 }
 
 String? _value(Map<String, dynamic> map, List<String> names) {

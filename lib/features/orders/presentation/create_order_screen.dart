@@ -7,6 +7,7 @@ import 'package:latlong2/latlong.dart';
 
 import '../../../core/state/app_state.dart';
 import '../../../shared/widgets/app_widgets.dart';
+import '../../profile/data/default_pickup_store.dart';
 import '../data/geocoding_service.dart';
 import '../data/orders_api.dart';
 import '../data/peak_hour_model.dart';
@@ -52,12 +53,45 @@ class _CreateOrderScreenState extends State<CreateOrderScreen>
     WidgetsBinding.instance.addObserver(this);
 
     _loadPeakHourConfig();
+    _loadSavedDefaultPickup();
 
     // Tự đồng bộ lại cấu hình khi Customer vẫn đang mở màn tạo đơn.
     _peakHourRefreshTimer = Timer.periodic(
       const Duration(seconds: 10),
       (_) => _loadPeakHourConfig(),
     );
+  }
+
+  Future<void> _loadSavedDefaultPickup() async {
+    final customerId = appState.value.customerId;
+
+    if (customerId == null || customerId.isEmpty) {
+      return;
+    }
+
+    try {
+      final saved = await defaultPickupStore.load(customerId);
+
+      if (!mounted || saved == null) return;
+
+      // Không ghi đè nếu user đã tự chọn pickup trong phiên hiện tại.
+      if (pickupLocation != null || pickupAddress.text.trim().isNotEmpty) {
+        return;
+      }
+
+      setState(() {
+        pickupLocation = LatLng(saved.latitude, saved.longitude);
+        pickupAddress.text = saved.address;
+      });
+
+      // QUAN TRỌNG:
+      // File hiện tại đã có flow tự tính phí thật bằng shippingFeeApi.
+      // Khi default pickup được nạp, gọi lại quote để nếu delivery đã có
+      // thì phí/quãng đường vẫn được tính tự động như feature hiện tại.
+      await _refreshShippingQuote();
+    } catch (error) {
+      debugPrint('Không tải được điểm lấy mặc định cục bộ: $error');
+    }
   }
 
   @override
@@ -284,8 +318,6 @@ class _CreateOrderScreenState extends State<CreateOrderScreen>
                   '${quote.distanceKm.toStringAsFixed(2)} km',
                 ),
                 Text('Thời gian dự kiến: ${quote.durationMinutes} phút'),
-                Text('Phí cơ bản: ${_formatMoney(quote.baseFee)}'),
-                Text('Đơn giá/km: ${_formatMoney(quote.feePerKm)}'),
                 if (quote.isPeakHour)
                   Text(
                     'Giờ cao điểm: x${quote.peakMultiplier}',
@@ -315,15 +347,27 @@ class _CreateOrderScreenState extends State<CreateOrderScreen>
       return;
     }
 
-    if (weightValue == null ||
-        weightValue <= 0 ||
-        codValue == null ||
-        codValue < 0 ||
-        feeValue == null ||
-        feeValue < 0 ||
-        receiverName.text.trim().isEmpty ||
+    if (weightValue == null || weightValue <= 0) {
+      _error('Khối lượng phải là số lớn hơn 0.');
+      return;
+    }
+
+    if (codValue == null || codValue < 0) {
+      _error('Tiền COD phải là số nguyên từ 0 trở lên.');
+      return;
+    }
+
+    if (feeValue == null || feeValue < 0) {
+      _error(
+        'Chưa có phí vận chuyển hợp lệ. '
+        'Vui lòng chọn đầy đủ điểm lấy và điểm giao.',
+      );
+      return;
+    }
+
+    if (receiverName.text.trim().isEmpty ||
         receiverPhone.text.trim().length != 10) {
-      _error('Vui lòng nhập đầy đủ thông tin đơn hàng hợp lệ.');
+      _error('Vui lòng nhập đầy đủ thông tin người nhận hợp lệ.');
       return;
     }
 
@@ -391,8 +435,35 @@ class _CreateOrderScreenState extends State<CreateOrderScreen>
     String hint,
     TextEditingController controller, {
     bool number = false,
+    bool integerOnly = false,
     bool phone = false,
   }) {
+    List<TextInputFormatter>? formatters;
+
+    if (phone) {
+      formatters = [
+        FilteringTextInputFormatter.digitsOnly,
+        LengthLimitingTextInputFormatter(10),
+      ];
+    } else if (number && integerOnly) {
+      // COD: chỉ cho nhập chữ số, không âm, không ký tự chữ.
+      formatters = [FilteringTextInputFormatter.digitsOnly];
+    } else if (number) {
+      // Khối lượng: chỉ cho số dương dạng 5 hoặc 5.25.
+      // Không cho chữ, dấu âm, nhiều dấu chấm hoặc quá 2 số thập phân.
+      formatters = [
+        TextInputFormatter.withFunction((oldValue, newValue) {
+          if (newValue.text.isEmpty) {
+            return newValue;
+          }
+
+          final valid = RegExp(r'^\d+(?:\.\d{0,2})?$').hasMatch(newValue.text);
+
+          return valid ? newValue : oldValue;
+        }),
+      ];
+    }
+
     return Padding(
       padding: const EdgeInsets.only(bottom: 14),
       child: InputBox(
@@ -400,16 +471,11 @@ class _CreateOrderScreenState extends State<CreateOrderScreen>
         hint,
         controller: controller,
         keyboardType: number
-            ? const TextInputType.numberWithOptions(decimal: true)
+            ? TextInputType.numberWithOptions(decimal: !integerOnly)
             : phone
             ? TextInputType.phone
             : null,
-        inputFormatters: phone
-            ? [
-                FilteringTextInputFormatter.digitsOnly,
-                LengthLimitingTextInputFormatter(10),
-              ]
-            : null,
+        inputFormatters: formatters,
       ),
     );
   }
@@ -563,7 +629,13 @@ class _CreateOrderScreenState extends State<CreateOrderScreen>
           const SizedBox(height: 18),
           _buildPeakHourWarning(),
           _input('Khối lượng (kg)', 'Ví dụ: 2.5', weight, number: true),
-          _input('Tiền COD (VNĐ)', '0 nếu không thu hộ', cod, number: true),
+          _input(
+            'Tiền COD (VNĐ)',
+            '0 nếu không thu hộ',
+            cod,
+            number: true,
+            integerOnly: true,
+          ),
           _shippingFeeSummary(),
           const Divider(height: 40, thickness: 4),
           const Text(
